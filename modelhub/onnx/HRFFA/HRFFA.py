@@ -32,8 +32,6 @@ from xlib.onnxruntime import (InferenceSession_with_device, ORTDeviceInfo,
 VARIANTS = {
     # 推荐: 精度/速度平衡 (9.0M params, CPU ~12ms)
     'vitt-256': ('hrffa_vitt_ibug68_1x3x256x256.onnx', 'center05'),
-    # 极轻量 CNN (1.6M params, CPU ~5ms), 精度略低
-    'hg0-256':  ('hrffa_hg0_ibug68_1x3x256x256.onnx',  'center05'),
     # 96px 低分辩率版本, 仅适合极低算力场景
     'vitt-96':  ('hrffa_vitt_ibug68_1x3x96x96.onnx',   'center05'),
     'hg0-96':   ('hrffa_hg0_ibug68_1x3x96x96.onnx',    'center05'),
