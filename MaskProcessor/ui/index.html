@@ -119,16 +119,77 @@
         <div class="panel-section">
           <div class="panel-section__header">
             <span class="panel-section__title">SAM</span>
-            <span class="panel-section__action"
+            <span class="panel-section__action" id="sam-backend-badge"
                   style="font-size:9px;background:rgba(91,91,214,0.15);
                          color:#8b8be6;padding:1px 5px;border-radius:3px;">
-              active
+              binary
             </span>
+          </div>
+          <!-- Click / box backend: SAM (hard mask) vs SAM2Matting (alpha) -->
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+            <span style="font-size:10px;color:rgba(255,255,255,0.45);">Backend:</span>
+            <div class="model-select" id="backend-group" style="flex:1;">
+              <button class="model-select__btn active" data-backend="sam">SAM</button>
+              <button class="model-select__btn" data-backend="sam2matting">SAM2Matting</button>
+            </div>
           </div>
           <div class="model-select">
             <button class="model-select__btn" data-model="vit_b">vit_b</button>
             <button class="model-select__btn active" data-model="vit_l">vit_l</button>
             <button class="model-select__btn" data-model="vit_h">vit_h</button>
+          </div>
+        </div>
+
+        <!-- SAM2Matting (alpha matting) -->
+        <div class="panel-section" id="matting-panel">
+          <div class="panel-section__header">
+            <span class="panel-section__title">SAM2MATTING</span>
+            <span class="panel-section__action" id="alpha-status"
+                  style="font-size:9px;color:rgba(255,255,255,0.3);">no alpha</span>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+            <span style="font-size:10px;color:rgba(255,255,255,0.45);">Model:</span>
+            <div class="model-select" id="matting-model-group" style="flex:1;">
+              <button class="model-select__btn active" data-matting-model="sam2.1_tiny">tiny</button>
+              <button class="model-select__btn" data-matting-model="sam2.1_base_plus">base+</button>
+            </div>
+          </div>
+
+          <!-- Alpha -> binary threshold. XSeg is binary, so alpha >= t becomes 1. -->
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px;">
+            <span style="font-size:10px;color:rgba(255,255,255,0.45);flex-shrink:0;" title="alpha >= threshold becomes foreground (XSeg masks are binary)">Threshold:</span>
+            <input type="range" id="alpha-threshold" min="5" max="95" step="1" value="50"
+                   style="flex:1;min-width:0;width:0;height:3px;-webkit-appearance:none;background:rgba(255,255,255,0.1);border-radius:2px;outline:none;">
+            <span id="alpha-threshold-label" style="font-size:10px;color:rgba(255,255,255,0.5);min-width:28px;text-align:right;flex-shrink:0;font-variant-numeric:tabular-nums;">0.50</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;">
+            <span style="font-size:10px;color:rgba(255,255,255,0.45);" title="Drop thresholded speckles smaller than N px (at image resolution)">Denoise:</span>
+            <div class="model-select" id="matting-minarea-group" style="flex:1;">
+              <button class="model-select__btn active" data-min-area="0">off</button>
+              <button class="model-select__btn" data-min-area="16">16</button>
+              <button class="model-select__btn" data-min-area="64">64</button>
+              <button class="model-select__btn" data-min-area="256">256</button>
+            </div>
+          </div>
+
+          <button class="btn-generate" onclick="app.refineWithMatting()"
+                  title="Send the current binary mask to SAM2Matting, get a soft alpha with hair detail, then binarise at the threshold">
+            Refine mask &rarr; Alpha
+          </button>
+          <div style="display:flex;gap:4px;margin-top:4px;">
+            <button class="btn-generate" id="alpha-preview-btn" style="flex:1;" disabled
+                    onclick="app.setAlphaPreview(!app.alphaPreview)"
+                    title="Overlay the alpha as a graded tint (white band = current threshold contour)">
+              Preview
+            </button>
+            <button class="btn-generate" id="alpha-clear-btn" style="flex:1;" disabled
+                    onclick="app.clearAlpha()" title="Forget the alpha; the binary mask stays">
+              Clear
+            </button>
+          </div>
+          <div style="font-size:9px;color:rgba(255,255,255,0.3);margin-top:6px;line-height:1.4;">
+            DFLJPG always receives a binary mask; the alpha only drives the threshold.
           </div>
         </div>
 
@@ -221,6 +282,9 @@
           <span class="shortcut-footer__item">
             <span class="shortcut-footer__key">&#8670;</span>/<span class="shortcut-footer__key">&#8671;</span> Prev/Next
           </span>
+          <span class="shortcut-footer__item">
+            <span class="shortcut-footer__key">[</span>/<span class="shortcut-footer__key">]</span> Alpha thr
+          </span>
         </div>
       </div>
     </div>
@@ -229,12 +293,12 @@
   <!-- ====================================================================
        Scripts — loaded in dependency order (no modules)
        ==================================================================== -->
-  <script src="js/api.js?v=9"></script>
-  <script src="js/canvas.js?v=9"></script>
-  <script src="js/tools/point.js?v=9"></script>
-  <script src="js/tools/brush.js?v=9"></script>
-  <script src="js/tools/pen.js?v=9"></script>
-  <script src="js/app.js?v=9"></script>
+  <script src="js/api.js?v=10"></script>
+  <script src="js/canvas.js?v=10"></script>
+  <script src="js/tools/point.js?v=10"></script>
+  <script src="js/tools/brush.js?v=10"></script>
+  <script src="js/tools/pen.js?v=10"></script>
+  <script src="js/app.js?v=10"></script>
   <script>
     (function () {
       'use strict';
@@ -451,12 +515,53 @@
       // ====================================================================
       document.querySelectorAll('.model-select__btn').forEach(function (el) {
         el.addEventListener('click', function () {
-          if (!el.dataset.model && !el.dataset.res && !el.dataset.xres) return;
+          var d = el.dataset;
+          if (!d.model && !d.res && !d.xres && !d.backend && !d.mattingModel && d.minArea === undefined) return;
           var parent = el.parentElement;
           var active = parent.querySelector('.active');
           if (active) active.classList.remove('active');
           el.classList.add('active');
         });
+      });
+
+      // ====================================================================
+      // SAM2Matting controls
+      // ====================================================================
+
+      // Backend toggle (SAM binary vs SAM2Matting alpha)
+      document.querySelectorAll('#backend-group [data-backend]').forEach(function (el) {
+        el.addEventListener('click', function () { app.setBackend(el.dataset.backend); });
+      });
+
+      // Matting model variant
+      document.querySelectorAll('#matting-model-group [data-matting-model]').forEach(function (el) {
+        el.addEventListener('click', function () {
+          app.mattingModel = el.dataset.mattingModel;
+          app.setStatus('SAM2Matting model: ' + app.mattingModel + ' (loaded on first use)');
+        });
+      });
+
+      // Speckle filter (server-side min connected-component area)
+      document.querySelectorAll('#matting-minarea-group [data-min-area]').forEach(function (el) {
+        el.addEventListener('click', function () {
+          app.mattingMinArea = parseInt(el.dataset.minArea, 10) || 0;
+        });
+      });
+
+      // Threshold slider — re-binarises the stored alpha instantly, no server call
+      var thrSlider = document.getElementById('alpha-threshold');
+      if (thrSlider) {
+        thrSlider.addEventListener('input', function () {
+          app.setAlphaThreshold(parseInt(thrSlider.value, 10) / 100);
+        });
+      }
+
+      // Keyboard: [ / ] nudge threshold when an alpha is loaded
+      document.addEventListener('keydown', function (e) {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+        if (!app.alpha) return;
+        if (e.key === '[') { e.preventDefault(); app.setAlphaThreshold(app.alphaThreshold - 0.05); }
+        if (e.key === ']') { e.preventDefault(); app.setAlphaThreshold(app.alphaThreshold + 0.05); }
       });
 
       // ====================================================================
