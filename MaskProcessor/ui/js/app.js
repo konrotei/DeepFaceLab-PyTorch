@@ -30,6 +30,20 @@
       this.history      = [];
       this._navCooldown  = false;   // [{mask, points}] undo stack
 
+      // ---- SAM2Matting (alpha) state --------------------------------------
+      // The canvas mask is always binary (-1/0/1) because DFL XSeg is binary.
+      // SAM2Matting returns a soft alpha; we keep it here so the threshold
+      // can be changed locally without another round-trip, and re-apply it on
+      // top of `alphaBase` (the mask as it was before the alpha was applied).
+      this.backend        = 'sam';          // 'sam' | 'sam2matting'
+      this.mattingModel   = 'sam2.1_tiny';  // 'sam2.1_tiny' | 'sam2.1_base_plus'
+      this.alphaThreshold = 0.5;
+      this.mattingMinArea = 0;              // px @ image res, server-side speckle filter
+      this.alpha          = null;           // { width, height, data: Float32Array }
+      this.alphaBase      = null;           // Float32Array snapshot | null (= empty)
+      this.alphaMode      = 'draw';         // how alpha is merged: 'draw' | 'exclude'
+      this.alphaPreview   = false;
+
       this._setupUI();
       this._registerTools();
       this._setupShortcuts();
@@ -412,6 +426,9 @@
 
       this.currentIndex = index;
 
+      // Alpha belongs to the previous image — drop it
+      this.clearAlpha();
+
       // Persist progress so it's remembered across sessions
       try { API.setProgress(index); } catch (_) {}
 
@@ -562,6 +579,196 @@
     }
 
     // ========================================================================
+    // SAM2Matting — alpha handling
+    // ========================================================================
+
+    /** Options object sent with every /mask/predict call. */
+    getPredictOpts () {
+      if (this.backend !== 'sam2matting') return { backend: 'sam' };
+      return {
+        backend:         'sam2matting',
+        matting_model:   this.mattingModel,
+        alpha_threshold: this.alphaThreshold,
+        min_area:        this.mattingMinArea
+      };
+    }
+
+    /** Switch prediction backend and refresh the panel badge. */
+    setBackend (name) {
+      this.backend = name === 'sam2matting' ? 'sam2matting' : 'sam';
+      var badge = document.getElementById('sam-backend-badge');
+      if (badge) badge.textContent = this.backend === 'sam2matting' ? 'matting' : 'binary';
+      document.querySelectorAll('[data-backend]').forEach(function (el) {
+        el.classList.toggle('active', el.dataset.backend === this.backend);
+      }, this);
+      this.setStatus(this.backend === 'sam2matting'
+        ? 'SAM2Matting: click / box → alpha; use the Threshold slider to binarise'
+        : 'SAM: binary mask');
+    }
+
+    /**
+     * Apply a SAM2Matting response ({ mask, alpha, alpha_threshold }).
+     * Decodes the alpha at the current mask resolution, snapshots the mask
+     * it is being merged into, then binarises via `rethresholdAlpha()`.
+     *
+     * @param {object}  result  – API response
+     * @param {string}  mode    – 'draw' | 'exclude' (how to merge)
+     * @param {boolean} replace – true: alpha replaces the mask (refine flow);
+     *                            false: alpha is merged into the existing mask
+     */
+    applyAlphaResult (result, mode, replace) {
+      var self = this;
+      if (!result || !result.alpha) return Promise.resolve(false);
+
+      return this._decodeGray(result.alpha).then(function (alpha) {
+        self.alpha     = alpha;
+        self.alphaMode = mode || 'draw';
+        if (typeof result.alpha_threshold === 'number') {
+          self.setAlphaThreshold(result.alpha_threshold, /*silent*/ true);
+        }
+
+        if (replace || !self.canvas.mask || !self.canvas.mask.data) {
+          self.alphaBase = null;
+        } else {
+          var src = self.canvas.mask.data;
+          self.alphaBase = new Float32Array(src.length);
+          self.alphaBase.set(src);
+        }
+
+        self.rethresholdAlpha();
+        self._updateAlphaUI();
+        return true;
+      });
+    }
+
+    /**
+     * Rebuild the binary canvas mask from `alphaBase` + thresholded `alpha`.
+     * Runs entirely client-side so the threshold slider feels instant.
+     */
+    rethresholdAlpha () {
+      if (!this.alpha || !this.alpha.data) return;
+
+      var res  = this.alpha.width;
+      var len  = res * res;
+      var data = new Float32Array(len);
+      if (this.alphaBase && this.alphaBase.length === len) data.set(this.alphaBase);
+
+      var ad  = this.alpha.data;
+      var thr = this.alphaThreshold;
+      var val = this.alphaMode === 'exclude' ? -1.0 : 1.0;
+      for (var i = 0; i < len; i++) {
+        if (ad[i] >= thr) data[i] = val;
+      }
+
+      this.canvas.mask = { width: res, height: res, data: data };
+      this.canvas.setAlphaPreview(this.alphaPreview ? this.alpha : null, thr);
+      this.canvas.renderNow();
+      this._updateCounts();
+    }
+
+    /** Update the threshold (0-1) and, if an alpha is loaded, re-binarise it. */
+    setAlphaThreshold (t, silent) {
+      t = Math.max(0.01, Math.min(0.99, Number(t) || 0.5));
+      this.alphaThreshold = t;
+
+      var slider = document.getElementById('alpha-threshold');
+      var label  = document.getElementById('alpha-threshold-label');
+      if (slider && Math.abs(parseInt(slider.value, 10) / 100 - t) > 0.004) {
+        slider.value = Math.round(t * 100);
+      }
+      if (label) label.textContent = t.toFixed(2);
+
+      if (!silent && this.alpha) this.rethresholdAlpha();
+      else this.canvas.alphaThreshold = t;
+    }
+
+    /** Toggle the soft alpha overlay on the canvas. */
+    setAlphaPreview (on) {
+      this.alphaPreview = !!on;
+      this.canvas.setAlphaPreview(this.alphaPreview ? this.alpha : null, this.alphaThreshold);
+      this._updateAlphaUI();
+    }
+
+    /** Forget the current alpha (image change, undo, manual clear). */
+    clearAlpha () {
+      this.alpha     = null;
+      this.alphaBase = null;
+      this.canvas.setAlphaPreview(null);
+      this._updateAlphaUI();
+    }
+
+    /**
+     * Send the current binary mask to SAM2Matting and replace it with the
+     * thresholded alpha (upstream `inference_image_sam2.py` flow).
+     */
+    async refineWithMatting () {
+      if (!this.canvas.mask || !this.canvas.mask.data) {
+        this.setStatus('Nothing to refine — create a mask first (SAM / brush / XSeg)');
+        return;
+      }
+      var b64 = this._maskToB64();   // negatives clamp to 0 => clean binary guide
+      if (!b64) return;
+
+      this.pushHistory();
+      this.canvas.setLoading(50, 'SAM2Matting refine...');
+      try {
+        var result = await API.mattingRefine(this.currentIndex, b64, this.getPredictOpts());
+        this.canvas.clearLoading();
+        if (result && result.alpha) {
+          await this.applyAlphaResult(result, 'draw', /*replace*/ true);
+          this.setStatus('Alpha ready — drag Threshold to adjust the binary edge');
+        } else {
+          this.setStatus('SAM2Matting returned no alpha');
+        }
+      } catch (err) {
+        this.canvas.clearLoading();
+        console.error('Matting refine error:', err);
+        this.setStatus('SAM2Matting error: ' + err.message);
+      }
+    }
+
+    /** Decode a base64 grayscale PNG into a Float32Array at mask resolution. */
+    _decodeGray (b64) {
+      var res = this.canvas.maskResolution || 256;
+      return new Promise(function (resolve, reject) {
+        var img = new Image();
+        img.onload = function () {
+          var c = document.createElement('canvas');
+          c.width = res; c.height = res;
+          var ctx = c.getContext('2d');
+          ctx.drawImage(img, 0, 0, res, res);
+          var px   = ctx.getImageData(0, 0, res, res).data;
+          var data = new Float32Array(res * res);
+          for (var i = 0; i < res * res; i++) data[i] = px[i * 4] / 255;
+          resolve({ width: res, height: res, data: data });
+        };
+        img.onerror = function () { reject(new Error('Failed to decode alpha PNG')); };
+        img.src = 'data:image/png;base64,' + b64;
+      });
+    }
+
+    /** Reflect alpha availability in the SAM2Matting panel. */
+    _updateAlphaUI () {
+      var has = !!(this.alpha && this.alpha.data);
+      var status = document.getElementById('alpha-status');
+      if (status) {
+        status.textContent = has ? 'alpha ready' : 'no alpha';
+        status.style.color = has ? '#5bd696' : 'rgba(255,255,255,0.3)';
+      }
+      var previewBtn = document.getElementById('alpha-preview-btn');
+      if (previewBtn) {
+        previewBtn.classList.toggle('active', this.alphaPreview && has);
+        previewBtn.disabled = !has;
+        previewBtn.style.opacity = has ? '' : '0.4';
+      }
+      var clearBtn = document.getElementById('alpha-clear-btn');
+      if (clearBtn) {
+        clearBtn.disabled = !has;
+        clearBtn.style.opacity = has ? '' : '0.4';
+      }
+    }
+
+    // ========================================================================
     // Undo
     // ========================================================================
 
@@ -593,6 +800,9 @@
       if (this.history.length === 0) return;
 
       var state = this.history.pop();
+      // The alpha was derived from a state we're leaving — re-thresholding
+      // on top of the restored mask would double-apply it.
+      this.clearAlpha();
       this.canvas.setMask(state.mask);
       this.canvas.setPoints([]);
       this._updateCounts();

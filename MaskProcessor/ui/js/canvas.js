@@ -2,7 +2,8 @@
  * MaskCanvas — 4-Layer HTML5 Canvas Rendering Engine
  *
  * Layer 0: Original Image    – drawn fitted to canvas center
- * Layer 1: Mask Overlay      – Float32Array mask as green (draw) or red (exclude) at 40% opacity
+ * Layer 1: Mask Overlay      – Float32Array mask as green (draw) or red (exclude) at 40% opacity,
+ *                              or a graded cyan SAM2Matting alpha preview when `alphaPreview` is set
  * Layer 2: Reference Points  – green/red circles with numeric labels
  * Layer 3: Tool Overlay      – pen preview, box selection, brush cursor
  *
@@ -35,6 +36,12 @@
       this.loading        = null;   // null | { percent: 0-100, label: 'string' }
       this._opacity       = 0.35;   // mask overlay opacity (0-1)
       this.maskResolution = 1024;   // mask canvas resolution (256/512/1024)
+      // SAM2Matting soft alpha preview: { width, height, data: Float32Array [0,1] } | null.
+      // When set, Layer 1 renders the alpha as a graded overlay (plus a thin
+      // threshold contour) instead of the flat hard mask, so users can see
+      // hair / edge softness while the underlying `mask` stays binary.
+      this.alphaPreview   = null;
+      this.alphaThreshold = 0.5;
 
       // ---- Image display geometry ------------------------------------------
       this.scale    = 1;
@@ -149,6 +156,17 @@
     setOpacity (val) {
       this._opacity = Math.max(0.05, Math.min(1, val));
       this.render();
+    }
+
+    /**
+     * Show / hide the SAM2Matting soft alpha preview.
+     * @param {null|{ width: number, height: number, data: Float32Array }} alpha
+     * @param {number=} threshold – current binarisation threshold (for the contour)
+     */
+    setAlphaPreview (alpha, threshold) {
+      this.alphaPreview = alpha || null;
+      if (typeof threshold === 'number') this.alphaThreshold = threshold;
+      this.renderNow();
     }
 
     /**
@@ -369,16 +387,51 @@
         if (t >= 1) { this._excludeFade = null; excludeFadeMul = 0; }
       }
 
-      for (var i = 0; i < len; i++) {
-        var v = data[i];
-        if (v > 0) {
+      var alpha = this.alphaPreview;
+      var useAlpha = !!(alpha && alpha.data && alpha.width === mw && alpha.height === mh);
+
+      if (useAlpha) {
+        // ---- Soft alpha preview (SAM2Matting) ------------------------------
+        // Foreground is tinted cyan with per-pixel opacity = alpha value, so
+        // hair strands and edge falloff are visible. Pixels sitting right at
+        // the threshold are drawn brighter to outline the binary mask that
+        // will actually be committed. Exclude strokes stay red.
+        var ad  = alpha.data;
+        var thr = this.alphaThreshold;
+        var band = 0.06;
+        var aMax = Math.round(Math.min(255, this._opacity * 255 * 1.6) * fadeAlpha);
+        for (var i = 0; i < len; i++) {
           var idx = i * 4;
-          px[idx] = 0; px[idx + 1] = 255; px[idx + 2] = 0; px[idx + 3] = a;
-        } else if (v < 0) {
-          var idx = i * 4;
-          var na = Math.round(a * excludeFadeMul);
-          if (na > 0) {
-            px[idx] = 255; px[idx + 1] = 0; px[idx + 2] = 0; px[idx + 3] = na;
+          var v = data[i];
+          if (v < 0) {
+            var na = Math.round(a * excludeFadeMul);
+            if (na > 0) { px[idx] = 255; px[idx + 1] = 0; px[idx + 2] = 0; px[idx + 3] = na; }
+            continue;
+          }
+          var av = ad[i];
+          if (av <= 0.004) continue;
+          var nearThr = Math.abs(av - thr) < band;
+          if (nearThr) {
+            px[idx] = 255; px[idx + 1] = 255; px[idx + 2] = 255;
+            px[idx + 3] = Math.round(aMax * 0.9);
+          } else {
+            px[idx] = 0; px[idx + 1] = 220; px[idx + 2] = 255;
+            px[idx + 3] = Math.round(aMax * av);
+          }
+        }
+      } else {
+        // ---- Hard mask (default) -------------------------------------------
+        for (var i = 0; i < len; i++) {
+          var v = data[i];
+          if (v > 0) {
+            var idx = i * 4;
+            px[idx] = 0; px[idx + 1] = 255; px[idx + 2] = 0; px[idx + 3] = a;
+          } else if (v < 0) {
+            var idx = i * 4;
+            var na = Math.round(a * excludeFadeMul);
+            if (na > 0) {
+              px[idx] = 255; px[idx + 1] = 0; px[idx + 2] = 0; px[idx + 3] = na;
+            }
           }
         }
       }

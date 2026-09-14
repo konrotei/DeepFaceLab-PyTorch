@@ -40,6 +40,15 @@
   function get(path) { return request('GET', path); }
   function post(path, body) { return request('POST', path, body); }
 
+  /** Pick only the SAM2Matting-related fields out of an options object. */
+  function mattingFields(opts) {
+    var out = {};
+    ['backend', 'matting_model', 'alpha_threshold', 'min_area', 'fill_holes_area'].forEach(function (k) {
+      if (opts[k] !== undefined && opts[k] !== null) out[k] = opts[k];
+    });
+    return out;
+  }
+
   window.API = {
 
     // ---- Preload -----------------------------------------------------------
@@ -57,13 +66,33 @@
       return get('/image/' + index);
     },
 
-    // ---- SAM mask prediction -----------------------------------------------
-    predictMask: function (index, clicks) {
-      return post('/mask/predict', { image_index: index, clicks: clicks });
+    // ---- SAM / SAM2Matting mask prediction ---------------------------------
+    /**
+     * @param {number}   index
+     * @param {Array}    clicks  – [[x, y, label], ...]
+     * @param {object=}  opts    – { backend, matting_model, alpha_threshold, min_area, fill_holes_area, box }
+     *   backend = 'sam' (default, binary) | 'sam2matting' (alpha; response also carries `alpha`).
+     */
+    predictMask: function (index, clicks, opts) {
+      var body = { image_index: index, clicks: clicks };
+      if (opts) {
+        if (opts.box) body.box = opts.box;
+        Object.assign(body, mattingFields(opts));
+      }
+      return post('/mask/predict', body);
     },
 
-    predictWithBox: function (index, box) {
-      return post('/mask/predict', { image_index: index, box: box });
+    predictWithBox: function (index, box, opts) {
+      var body = { image_index: index, box: box };
+      if (opts) Object.assign(body, mattingFields(opts));
+      return post('/mask/predict', body);
+    },
+
+    // ---- SAM2Matting: refine current hard mask into a soft alpha -----------
+    mattingRefine: function (index, maskB64, opts) {
+      var body = { image_index: index, mask: maskB64 };
+      if (opts) Object.assign(body, mattingFields(opts));
+      return post('/mask/matting/refine', body);
     },
 
     // ---- Text-to-mask (GroundedSAM2 / OWL-ViT) -----------------------------
