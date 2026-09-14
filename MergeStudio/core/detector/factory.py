@@ -104,7 +104,6 @@ class LandmarkFactory:
             ('MobileFaceNet',        'modelhub.onnx.MobileFaceNet',  'MobileFaceNet'),
             # HRFFA: 68 点, 极端角度鲁棒 (yaw ±90 / pitch ±85 / roll 360)
             ('HRFFA-vitt-256',       'modelhub.onnx.HRFFA',          'HRFFA'),
-            ('HRFFA-hg0-256',        'modelhub.onnx.HRFFA',          'HRFFA'),
             ('HRFFA-vitl-320',       'modelhub.onnx.HRFFA',          'HRFFA'),
         ]
         for name, mod_path, cls_name in _models:
