@@ -159,3 +159,67 @@ def mask_to_polygons(
         polygons.append(pts)
 
     return polygons
+
+
+# ---------------------------------------------------------------------------
+# Alpha (soft matte) -> binary XSeg mask
+# ---------------------------------------------------------------------------
+
+
+def alpha_to_binary(
+    alpha: np.ndarray,
+    threshold: float = 0.5,
+    min_area: int = 0,
+    fill_holes_area: int = 0,
+) -> np.ndarray:
+    """Convert a soft alpha matte in [0, 1] to the hard 0/1 mask XSeg expects.
+
+    SAM2Matting produces fractional alpha at hair, motion blur and translucent
+    regions. DeepFaceLab's XSeg trainer hard-thresholds masks at 0.5 and its
+    ``seg_ie_polys`` are polygons, so the alpha has to be binarised before it
+    is stored. Lower thresholds keep more of the semi-transparent hair fringe;
+    higher thresholds keep only the solid core.
+
+    Args:
+        alpha: (H, W) float32 alpha in [0, 1] (extra trailing channel is fine).
+        threshold: Alpha values ``>= threshold`` become foreground.
+        min_area: Drop foreground connected components smaller than this many
+            pixels — semi-transparent regions tend to produce speckles once
+            thresholded. ``0`` disables the filter.
+        fill_holes_area: Fill background holes smaller than this many pixels
+            (e.g. gaps between hair strands). ``0`` disables the filter.
+
+    Returns:
+        (H, W) float32 mask containing only 0.0 and 1.0.
+    """
+    a = np.asarray(alpha, dtype=np.float32)
+    if a.ndim == 3:
+        a = a[..., 0]
+    threshold = float(np.clip(threshold, 0.0, 1.0))
+
+    binary = (a >= threshold).astype(np.uint8)
+
+    if min_area > 0:
+        binary = _remove_small_components(binary, min_area)
+
+    if fill_holes_area > 0:
+        holes = _remove_small_components(1 - binary, fill_holes_area)
+        binary = 1 - holes
+
+    return binary.astype(np.float32)
+
+
+def _remove_small_components(binary: np.ndarray, min_area: int) -> np.ndarray:
+    """Zero out 8-connected components of a uint8 0/1 mask with area < min_area."""
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    if num <= 1:
+        return binary
+    keep = stats[:, cv2.CC_STAT_AREA] >= min_area
+    keep[0] = False  # label 0 is background
+    return keep[labels].astype(np.uint8)
+
+
+def is_binary_mask(mask: np.ndarray, tol: float = 1e-3) -> bool:
+    """Return True if every value in *mask* is (within *tol*) either 0 or 1."""
+    m = np.asarray(mask, dtype=np.float32)
+    return bool(np.all((np.abs(m) < tol) | (np.abs(m - 1.0) < tol)))

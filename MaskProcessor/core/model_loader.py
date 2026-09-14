@@ -21,6 +21,9 @@ class ModelLoader:
     _grounded_sam2_lock = threading.Lock()
     _bisenet = None
     _bisenet_lock = threading.Lock()
+    _sam2matting = None
+    _sam2matting_name: Optional[str] = None
+    _sam2matting_lock = threading.Lock()
     _device: Optional[str] = None
 
     @classmethod
@@ -77,3 +80,33 @@ class ModelLoader:
 
                     cls._bisenet = BiSeNetParser(device=cls._get_device())
         return cls._bisenet
+
+    @classmethod
+    def get_sam2matting(cls, model_name: str = "sam2.1_tiny") -> "SAM2MattingPredictor":
+        """Return the SAM2Matting predictor, (re)loading it if *model_name* changed.
+
+        Failures (typically a missing checkpoint) are NOT cached so the user
+        can drop the file in place and simply retry.
+        """
+        if cls._sam2matting is None or cls._sam2matting_name != model_name:
+            with cls._sam2matting_lock:
+                if cls._sam2matting is None or cls._sam2matting_name != model_name:
+                    from MaskProcessor.core.sam2matting_predictor import SAM2MattingPredictor
+
+                    if cls._sam2matting is not None:
+                        # Free the previous variant before loading another one.
+                        cls._sam2matting = None
+                        cls._sam2matting_name = None
+                        try:
+                            import torch
+
+                            if torch.cuda.is_available():
+                                torch.cuda.empty_cache()
+                        except Exception:
+                            pass
+
+                    cls._sam2matting = SAM2MattingPredictor(
+                        model_name=model_name, device=cls._get_device()
+                    )
+                    cls._sam2matting_name = model_name
+        return cls._sam2matting
