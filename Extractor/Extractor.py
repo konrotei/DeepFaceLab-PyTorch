@@ -186,7 +186,6 @@ class LandmarkFactory:
         'MobileFaceNet': MobileFaceNetLandmark,
         # HRFFA (High-Angle Robust Fast FaceAlignment): 68 点, 极端角度鲁棒
         'HRFFA-vitt-256': HRFFALandmark,   # 推荐, 精度/速度平衡
-        'HRFFA-hg0-256': HRFFALandmark,    # 极轻量 CNN
         'HRFFA-vitl-320': HRFFALandmark,   # 教师模型, 1.2GB, 精度最高
     }.items() if v is not None}
 
