@@ -1,4 +1,4 @@
-"""Mask routes — predict, refine, save, and undo masks using SAM / BiSeNet."""
+"""Mask routes — predict, refine, save, and undo masks using SAM / SAM2Matting / BiSeNet."""
 
 from fastapi import APIRouter, HTTPException
 import base64
@@ -8,6 +8,8 @@ from pydantic import BaseModel
 
 from MaskProcessor.api.schemas import (
     MaskPredictRequest,
+    MaskMattingRefineRequest,
+    MattingOptions,
     MaskTextRequest,
     MaskBiSeNetRequest,
     MaskSaveRequest,
@@ -17,6 +19,7 @@ from MaskProcessor.api.schemas import (
 )
 from MaskProcessor.api.routes_project import get_workspace
 from MaskProcessor.core.model_loader import ModelLoader
+from MaskProcessor.core.mask_ops import alpha_to_binary
 
 router = APIRouter()
 
@@ -64,11 +67,65 @@ def _bgr_from_workspace(image_index: int) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 
+def _get_sam2matting(model_name: str):
+    """Load the SAM2Matting predictor, mapping load errors to a helpful 503."""
+    try:
+        return ModelLoader.get_sam2matting(model_name)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=503, detail=f"SAM2Matting 权重缺失：{e}")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"SAM2Matting 模型加载失败：{e}")
+
+
+def _matting_response(alpha: np.ndarray, opts: MattingOptions) -> MaskResponse:
+    """Alpha (soft) -> XSeg binary mask + raw alpha for client-side re-thresholding."""
+    binary = alpha_to_binary(
+        alpha,
+        threshold=opts.alpha_threshold,
+        min_area=opts.min_area,
+        fill_holes_area=opts.fill_holes_area,
+    )
+    return MaskResponse(
+        mask=_mask_to_b64(binary),
+        alpha=_mask_to_b64(alpha),
+        alpha_threshold=opts.alpha_threshold,
+    )
+
+
 @router.post("/mask/predict", response_model=MaskResponse)
 async def mask_predict(req: MaskPredictRequest):
-    """Generate a mask from point clicks and/or a bounding box using SAM."""
+    """Generate a mask from point clicks and/or a bounding box.
+
+    ``backend="sam"`` (default) returns a hard mask from segment_anything.
+    ``backend="sam2matting"`` runs SAM2Matting: SAM2 turns the prompts into a
+    coarse mask, the matting heads turn that into a soft alpha. The alpha is
+    binarised server-side with ``alpha_threshold`` so ``mask`` is always
+    XSeg-compatible, and the raw alpha is returned alongside it.
+    """
     bgr = _bgr_from_workspace(req.image_index)
     h, w = bgr.shape[:2]
+
+    if not req.box and not req.clicks:
+        raise HTTPException(status_code=400, detail="Provide 'clicks', 'box', or both")
+
+    if req.backend == "sam2matting":
+        matting = _get_sam2matting(req.matting_model)
+        matting.load_image(bgr)
+        clicks_flat = [(x, y, label) for x, y, label in req.clicks] if req.clicks else []
+        box = tuple(req.box) if req.box else None
+        try:
+            alpha = matting.predict(clicks_flat, box=box)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"SAM2Matting 推理失败：{e}")
+        return _matting_response(alpha, req)
+
+    if req.backend != "sam":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown backend '{req.backend}'. Use 'sam' or 'sam2matting'.",
+        )
 
     # Load image into SAM
     sam = ModelLoader.get_sam()
@@ -96,6 +153,41 @@ async def mask_predict(req: MaskPredictRequest):
         raise HTTPException(status_code=400, detail="Provide 'clicks', 'box', or both")
 
     return MaskResponse(mask=_mask_to_b64(mask))
+
+
+# ---------------------------------------------------------------------------
+# POST /api/mask/matting/refine  —  existing binary mask -> SAM2Matting alpha
+# ---------------------------------------------------------------------------
+
+
+@router.post("/mask/matting/refine", response_model=MaskResponse)
+async def mask_matting_refine(req: MaskMattingRefineRequest):
+    """Refine the current (hard) mask into a soft alpha matte with SAM2Matting.
+
+    This is the upstream ``inference_image_sam2.py`` flow: the mask drawn or
+    generated in the editor (brush, pen, SAM, BiSeNet, XSeg…) becomes the
+    coarse guide for the ROI detector + progressive matting heads. Useful for
+    recovering hair strands from a blobby XSeg / BiSeNet mask.
+    """
+    bgr = _bgr_from_workspace(req.image_index)
+    h, w = bgr.shape[:2]
+
+    guide = _b64_to_mask(req.mask)
+    if guide is None or guide.size == 0:
+        raise HTTPException(status_code=400, detail="Invalid mask payload")
+    if guide.shape[:2] != (h, w):
+        guide = cv2.resize(guide, (w, h), interpolation=cv2.INTER_LINEAR)
+    if float((guide > 0.5).sum()) == 0.0:
+        raise HTTPException(status_code=400, detail="Mask is empty — nothing to refine")
+
+    matting = _get_sam2matting(req.matting_model)
+    matting.load_image(bgr)
+    try:
+        alpha = matting.refine(guide)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"SAM2Matting 推理失败：{e}")
+
+    return _matting_response(alpha, req)
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +255,7 @@ async def mask_bisenet(req: MaskBiSeNetRequest):
 
 @router.post("/model/preload")
 async def model_preload():
-    """Trigger lazy loading of SAM, GroundedSAM2, and BiSeNet in the background."""
+    """Trigger lazy loading of SAM, GroundedSAM2, BiSeNet and SAM2Matting in the background."""
     import threading
 
     def _load_all():
@@ -179,6 +271,11 @@ async def model_preload():
             ModelLoader.get_bisenet()
         except Exception as e:
             print(f"[preload] BiSeNet: {e}")
+        try:
+            ModelLoader.get_sam2matting()
+        except Exception as e:
+            # Optional backend — usually just means the checkpoint isn't downloaded yet.
+            print(f"[preload] SAM2Matting (optional): {e}")
         print("[preload] All models loaded")
 
     threading.Thread(target=_load_all, daemon=True).start()
