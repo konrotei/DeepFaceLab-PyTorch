@@ -246,14 +246,12 @@ class DataExtractionPage(SiPage):
                             "OpenSeeFace",
                             "PFLD",
                             "HRFFA-vitt-256",
-                            "HRFFA-hg0-256",
                             "HRFFA-vitl-320"
                         ])
                         self.landmark_detector_combobox.setCurrentText("insightface-2d106det")
                         self.landmark_detector_combobox.setToolTip(
                             "选择特征点标记算法\n"
                             "HRFFA-vitt-256: 大角度鲁棒 68 点(侧脸/俯仰/旋转), 推荐\n"
-                            "HRFFA-hg0-256: HRFFA 极轻量版, 更快但精度略低\n"
                             "HRFFA-vitl-320: HRFFA 教师模型(1.2GB), 精度最高但很慢")
                         self.landmark_detector_combobox.currentIndexChanged.connect(self._update_face_tooltip)
                         # 输出格式选择组合框
