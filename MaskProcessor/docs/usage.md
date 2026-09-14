@@ -120,6 +120,35 @@ matching the description and generate masks.
 **Prompt types**: Text only. Point and box prompts are not available when
 this backend is selected.
 
+### SAM2Matting (alpha matting)
+
+SAM2Matting produces a **soft alpha matte** instead of a hard mask — it keeps
+hair strands, wisps and semi-transparent edges. Because XSeg only understands
+binary masks, the alpha is never stored directly; you pick where to cut it.
+
+**Enable it**: in the **SAM** panel switch *Backend* to **SAM2Matting**. The
+Point tool (single click, Ctrl-group, box) then calls SAM2Matting instead of
+SAM. The panel badge changes from `binary` to `matting`.
+
+**SAM2MATTING panel**
+
+| Control                     | What it does                                                                                     |
+|-----------------------------|--------------------------------------------------------------------------------------------------|
+| Model `tiny` / `base+`      | Which checkpoint to use (loaded lazily on first use, swapped on change).                         |
+| **Threshold**               | `alpha >= threshold` becomes foreground. Re-binarises the stored alpha instantly, client-side. Lower = more hair fringe, higher = solid core only. `[` / `]` nudge by 0.05. |
+| Denoise                     | Server-side: drop thresholded speckles smaller than N px (alpha at hair tips often breaks into dots). |
+| **Refine current mask → Alpha** | Sends the current binary mask (brush / pen / SAM / BiSeNet / XSeg) as the coarse guide and replaces it with SAM2Matting's alpha, binarised at the current threshold. This is the upstream `inference_image_sam2.py` flow and is the quickest way to recover hair from a blobby XSeg mask. |
+| Alpha preview               | Draws the alpha as a graded cyan overlay; the white band marks the current threshold contour, i.e. exactly what will be committed. |
+| Clear alpha                 | Forgets the alpha (the binary mask stays as-is).                                                  |
+
+**How the alpha is merged**: the response is applied on top of the mask as it
+was before the click (respecting Draw / Exclude mode). Dragging the threshold
+re-applies it on that snapshot, so your earlier brush strokes are preserved.
+Undo, image navigation and changing the mask resolution clear the alpha.
+
+**What gets saved**: always the binary canvas mask (`0` / `1`), exactly like
+the other backends — `xseg_mask` raster plus `seg_ie_polys` polygons.
+
 ### BiSeNet
 
 A lightweight face-parsing model. Does not require prompts. Click **Run**

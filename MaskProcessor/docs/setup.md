@@ -107,6 +107,34 @@ The server runs on `127.0.0.1:8000` by default. To change the port:
 python -m MaskProcessor --port 8080
 ```
 
+## Optional: SAM2Matting (alpha matting)
+
+[SAM2Matting](https://github.com/FudanCVL/SAM2Matting) adds a soft *alpha
+matte* backend (hair strands, translucency) on top of the SAM2 backbone that
+already ships in `xlib/models/sam2`. No extra Python packages are needed
+beyond the SAM2 requirements (`hydra-core`, `omegaconf`, `torch>=2.x`).
+
+Download a checkpoint from
+https://huggingface.co/FudanCVL/SAM2Matting/tree/main/checkpoints and place it
+next to the SAM2 checkpoints:
+
+| UI name | File                              | Path                                                      |
+|---------|-----------------------------------|-----------------------------------------------------------|
+| tiny    | `SAM2Matting-SAM2.1Tiny.pt`       | `xlib/models/sam2/checkpoints/SAM2Matting-SAM2.1Tiny.pt`  |
+| base+   | `SAM2Matting-SAM2.1Base+.pt`      | `xlib/models/sam2/checkpoints/SAM2Matting-SAM2.1Base+.pt` |
+
+The SAM3-based variant is not supported (it needs the separate `sam3`
+package). If the checkpoint is missing, the rest of MaskProcessor keeps
+working and the SAM2Matting buttons return a `503` with the download hint.
+
+> **Binary vs alpha.** DeepFaceLab XSeg masks are strictly binary
+> (`DynamicSampleGenerator` thresholds at 0.5, `seg_ie_polys` are polygons).
+> SAM2Matting returns alpha in `[0, 1]`. MaskProcessor therefore never writes
+> the alpha to a DFLJPG: the server binarises it with
+> `mask_ops.alpha_to_binary(alpha, threshold, min_area)` and also returns the
+> raw alpha so the UI can re-threshold interactively. See the
+> [Usage Guide](usage.md#sam2matting-alpha-matting).
+
 ## Next Steps
 
 Once the server is running, head to the [Usage Guide](usage.md) for an
