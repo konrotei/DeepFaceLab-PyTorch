@@ -5,6 +5,9 @@
  *   1) Single click (no Ctrl): left click = foreground point, predict immediately
  *   2) Ctrl held (multi-point group): Ctrl+Left = FG, Ctrl+Right = BG, release to finalize
  *
+ * Backend is chosen by app.backend ('sam' → binary mask, 'sam2matting' → soft
+ * alpha that the app binarises with a user-controlled threshold).
+ *
  * Depends on: window.API, window.MaskCanvas
  * Exports:    window.PointTool
  */
@@ -79,6 +82,22 @@
     img.src = 'data:image/png;base64,' + b64;
   }
 
+  /**
+   * Apply a /mask/predict response from either backend.
+   *  - SAM2Matting: response carries `alpha` → hand to app.applyAlphaResult so
+   *    the threshold slider can re-binarise it locally.
+   *  - SAM: plain binary `mask` → merge as before.
+   */
+  function applyPredictResult (app, canvas, result, clickMode) {
+    if (!result || !result.success || !result.mask) return;
+    app.pushHistory();
+    if (result.alpha && app.applyAlphaResult) {
+      app.applyAlphaResult(result, clickMode, /*replace*/ false);
+    } else {
+      decodeAndSetMask(canvas, result.mask, clickMode);
+    }
+  }
+
   // ==========================================================================
   // PointTool
   // ==========================================================================
@@ -142,14 +161,12 @@
 
           var self = this;
           var clickMode = this.canvas.mode;
-          self.canvas.setLoading(50, 'Generating mask...');
-          API.predictMask(this.app.currentIndex, clicks)
+          var opts = this.app.getPredictOpts ? this.app.getPredictOpts() : undefined;
+          self.canvas.setLoading(50, opts && opts.backend === 'sam2matting' ? 'SAM2Matting...' : 'Generating mask...');
+          API.predictMask(this.app.currentIndex, clicks, opts)
             .then(function (result) {
               self.canvas.clearLoading();
-              if (result.success && result.mask) {
-                self.app.pushHistory();
-                decodeAndSetMask(self.canvas, result.mask, clickMode);
-              }
+              applyPredictResult(self.app, self.canvas, result, clickMode);
               self.canvas.setPoints([]);
             })
             .catch(function (err) {
@@ -235,15 +252,13 @@
 
       var self = this;
       var releaseMode = this.canvas.mode;
-      self.canvas.setLoading(50, 'Generating mask...');
-      API.predictMask(this.app.currentIndex, clicks)
+      var opts = this.app.getPredictOpts ? this.app.getPredictOpts() : undefined;
+      self.canvas.setLoading(50, opts && opts.backend === 'sam2matting' ? 'SAM2Matting...' : 'Generating mask...');
+      API.predictMask(this.app.currentIndex, clicks, opts)
         .then(function (result) {
           self.canvas.clearLoading();
           self.canvas.setPoints([]);
-          if (result.success && result.mask) {
-            self.app.pushHistory();
-            decodeAndSetMask(self.canvas, result.mask, releaseMode);
-          }
+          applyPredictResult(self.app, self.canvas, result, releaseMode);
         })
         .catch(function (err) {
           self.canvas.clearLoading();
